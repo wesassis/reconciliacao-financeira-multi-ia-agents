@@ -1,27 +1,68 @@
+# -*- coding: utf-8 -*-
+
 # agent_orchestrator.py
 import os
 import json
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain.schema.output_parser import StrOutputParser
+# Importações CORRIGIDAS para o SDK nativo do Google
+import google.generativeai as genai
+from google.generativeai import types # Esta é a linha corrigida
 from tools import processar_reconciliacao
+
+# --- Configuração Inicial ---
 
 # Carregar variáveis de ambiente do arquivo .env
 load_dotenv()
 
-# Validação da chave de API
-if not os.getenv("GOOGLE_API_KEY"):
-    raise ValueError("A chave de API do Google não foi encontrada. Defina a variável de ambiente GOOGLE_API_KEY.")
+# Validação e configuração da chave de API para o SDK nativo
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("A chave de API do Google não foi encontrada. Defina a variável de ambiente GEMINI_API_KEY.")
 
-def criar_cadeia_de_reconciliacao():
-    """
-    Cria e configura a cadeia LangChain para análise e geração de lançamentos.
-    """
-    # 1. Configurar o Modelo de Linguagem (LLM)
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0.2)
+# Configura o cliente do Google GenAI
+genai.configure(api_key=api_key)
 
-    # 2. Definir o Prompt Template CORRIGIDO
+
+def extrair_json_da_resposta(text: str):
+    """
+    Extrai o conteúdo JSON de uma string que pode conter blocos de código markdown.
+    """
+    if not text:
+        return None
+    try:
+        json_block_start = text.find('```json')
+        if json_block_start == -1:
+            json_block_start = text.find('[')
+            if json_block_start == -1: return None
+        else:
+            json_block_start += len('```json')
+
+        json_block_end = text.rfind('```')
+        if json_block_end == -1:
+            json_block_end = text.rfind(']') + 1
+            if json_block_end == 0: return None
+
+        json_string = text[json_block_start:json_block_end].strip()
+        return json.loads(json_string)
+    except (json.JSONDecodeError, IndexError) as e:
+        print(f"Erro ao decodificar JSON: {e}")
+        print(f"Texto recebido: {text}")
+        return None
+
+def executar_processo_completo(path_contabil: str, path_fiscal: str):
+    """
+    Orquestra todo o processo: reconciliação e depois análise pela IA usando o SDK nativo.
+    """
+    print("Iniciando a reconciliação com a ferramenta...")
+    report_pendencias = processar_reconciliacao(path_contabil, path_fiscal)
+    print("Relatório de pendências gerado:")
+    print(report_pendencias)
+
+    if "Nenhuma pendência encontrada" in report_pendencias:
+        return []
+
+    # --- Invocação Direta da API do Gemini ---
+    
     prompt_template = """
     Você é um assistente contábil especialista em reconciliação fiscal e contábil.
     Sua tarefa é analisar uma lista de pendências e, para cada uma, gerar um lançamento contábil de ajuste para o mês seguinte,
@@ -66,62 +107,25 @@ def criar_cadeia_de_reconciliacao():
     ]
     ```
     """
-    
-    prompt = PromptTemplate(
-        input_variables=["report"],
-        template=prompt_template,
-    )
 
-    # 3. Criar a Cadeia (Chain)
-    chain = prompt | llm | StrOutputParser()
+    prompt_final = prompt_template.format(report=report_pendencias)
     
-    return chain
-
-def extrair_json_da_resposta(text: str):
-    """
-    Extrai o conteúdo JSON de uma string que pode conter blocos de código markdown.
-    """
+    print("\nInvocando a API do Gemini diretamente para análise e geração de lançamentos...")
+    
+    resposta_llm = ""
     try:
-        # Encontra o início e o fim do bloco de código JSON
-        json_block_start = text.find('```json')
-        if json_block_start == -1:
-             json_block_start = text.find('[')
-             if json_block_start == -1: return None
-        else:
-             json_block_start += len('```json')
+        modelo = genai.GenerativeModel('gemini-2.5-flash')
+        resposta = modelo.generate_content(
+            contents=prompt_final,
+            generation_config=types.GenerationConfig(temperature=0.2)
+        )
+        resposta_llm = resposta.text
+        print("\nResposta bruta do LLM recebida.")
         
-        json_block_end = text.rfind('```')
-        if json_block_end == -1:
-             json_block_end = text.rfind(']') + 1
-             if json_block_end == 0: return None
-
-        # Extrai e limpa a string JSON
-        json_string = text[json_block_start:json_block_end].strip()
-
-        # Carrega a string JSON para um objeto Python
-        return json.loads(json_string)
-    except (json.JSONDecodeError, IndexError) as e:
-        print(f"Erro ao decodificar JSON: {e}")
-        print(f"Texto recebido: {text}")
+    except Exception as e:
+        print(f"Ocorreu um erro ao chamar a API do Gemini: {e}")
         return None
 
-def executar_processo_completo(path_contabil, path_fiscal):
-    """
-    Orquestra todo o processo: reconciliação e depois análise pela IA.
-    """
-    print("Iniciando a reconciliação com a ferramenta...")
-    report_pendencias = processar_reconciliacao(path_contabil, path_fiscal)
-    print("Relatório de pendências gerado:")
-    print(report_pendencias)
-
-    if "Nenhuma pendência encontrada" in report_pendencias:
-        return []
-
-    print("\nInvocando a cadeia de IA para análise e geração de lançamentos...")
-    cadeia = criar_cadeia_de_reconciliacao()
-    resposta_llm = cadeia.invoke({"report": report_pendencias})
-    print("\nResposta bruta do LLM recebida.")
-    
     print("\nExtraindo JSON da resposta...")
     resultado_json = extrair_json_da_resposta(resposta_llm)
     
